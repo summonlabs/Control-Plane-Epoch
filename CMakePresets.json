@@ -1,0 +1,142 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 21,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "release",
+      "displayName": "Release (Ninja, optimized)",
+      "description": "Ninja single-configuration optimized build of the library, the tools, the examples, the benchmarks, and the test suites into build/release. Configure from a developer environment that provides the toolchain (for the MSVC toolset: vcvars64.bat).",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CONTROL_PLANE_EPOCH_BUILD_TESTS": "ON",
+        "CONTROL_PLANE_EPOCH_BUILD_APPS": "ON",
+        "CONTROL_PLANE_EPOCH_BUILD_EXAMPLES": "ON",
+        "CONTROL_PLANE_EPOCH_BUILD_BENCHMARKS": "ON"
+      }
+    },
+    {
+      "name": "debug",
+      "displayName": "Debug (Ninja, unoptimized)",
+      "description": "Ninja single-configuration debug build of the library, the tools, the examples, the benchmarks, and the test suites into build/debug.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CONTROL_PLANE_EPOCH_BUILD_TESTS": "ON",
+        "CONTROL_PLANE_EPOCH_BUILD_APPS": "ON",
+        "CONTROL_PLANE_EPOCH_BUILD_EXAMPLES": "ON",
+        "CONTROL_PLANE_EPOCH_BUILD_BENCHMARKS": "ON"
+      }
+    },
+    {
+      "name": "analyze",
+      "displayName": "MSVC static analysis (Ninja)",
+      "description": "Ninja single-configuration build with the MSVC static analyzer enabled on first-party code (/analyze). Platform and standard-library headers are declared external so that only first-party findings are reported. Warnings-as-errors is off for this diagnostic configuration: the analyzer reports C6101 from the Windows SDK header ws2tcpip.h (included by src/socket.cpp) through the translation unit, which /external:W0 does not suppress, so /WX would stop the analysis run instead of reporting findings. The release and debug presets keep warnings-as-errors on.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/analyze",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CONTROL_PLANE_EPOCH_ENABLE_ANALYZE": "ON",
+        "CONTROL_PLANE_EPOCH_WARNINGS_AS_ERRORS": "OFF",
+        "CONTROL_PLANE_EPOCH_BUILD_TESTS": "ON",
+        "CONTROL_PLANE_EPOCH_BUILD_APPS": "ON",
+        "CONTROL_PLANE_EPOCH_BUILD_EXAMPLES": "ON",
+        "CONTROL_PLANE_EPOCH_BUILD_BENCHMARKS": "ON"
+      }
+    },
+    {
+      "name": "asan",
+      "displayName": "MSVC AddressSanitizer (Ninja)",
+      "description": "Ninja single-configuration build with MSVC AddressSanitizer instrumentation (/fsanitize=address /Zi) and incremental linking disabled, which AddressSanitizer requires.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/asan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_FLAGS": "/fsanitize=address /Zi",
+        "CMAKE_EXE_LINKER_FLAGS": "/INCREMENTAL:NO",
+        "CONTROL_PLANE_EPOCH_BUILD_TESTS": "ON",
+        "CONTROL_PLANE_EPOCH_BUILD_APPS": "ON",
+        "CONTROL_PLANE_EPOCH_BUILD_EXAMPLES": "ON",
+        "CONTROL_PLANE_EPOCH_BUILD_BENCHMARKS": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "release",
+      "displayName": "Build Release",
+      "configurePreset": "release"
+    },
+    {
+      "name": "debug",
+      "displayName": "Build Debug",
+      "configurePreset": "debug"
+    },
+    {
+      "name": "analyze",
+      "displayName": "Build with MSVC static analysis",
+      "configurePreset": "analyze"
+    },
+    {
+      "name": "asan",
+      "displayName": "Build with AddressSanitizer",
+      "configurePreset": "asan"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "release",
+      "displayName": "Test Release",
+      "description": "Runs the ctest test registered by tests/CMakeLists.txt against the Release build.",
+      "configurePreset": "release",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "stopOnFailure": true
+      }
+    },
+    {
+      "name": "debug",
+      "displayName": "Test Debug",
+      "description": "Runs the ctest test registered by tests/CMakeLists.txt against the Debug build.",
+      "configurePreset": "debug",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "stopOnFailure": true
+      }
+    },
+    {
+      "name": "analyze",
+      "displayName": "Test the static-analysis build",
+      "description": "Runs the ctest test registered by tests/CMakeLists.txt against the static-analysis build.",
+      "configurePreset": "analyze",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "stopOnFailure": true
+      }
+    },
+    {
+      "name": "asan",
+      "displayName": "Test under AddressSanitizer",
+      "description": "Runs the ctest test registered by tests/CMakeLists.txt under AddressSanitizer.",
+      "configurePreset": "asan",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "stopOnFailure": true
+      }
+    }
+  ]
+}
