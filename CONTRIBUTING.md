@@ -40,11 +40,8 @@ that you cannot justify; commit authorship is recorded by Git itself.
    ctest --test-dir build/debug --output-on-failure
    ```
 
-   Tests are expected to terminate on their own. Do not add timeouts, watchdogs,
-   or "kill the process and call it a pass" logic; a hanging test is a defect and
-   must be diagnosed. The harness has no timeout mechanism by design, and a child
-   process that exits before producing the line a case waits for is an explicit
-   assertion failure, not a skip.
+   A child process that exits before producing the line a case waits for is an
+   explicit assertion failure, not a skip.
 
 3. If your change can affect durability, run a sanitizer build as well:
 
