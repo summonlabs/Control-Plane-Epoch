@@ -1,7 +1,7 @@
 # Control Plane Epoch
 
-Control Plane Epoch is repository 8 of 8 of the Data Center Control Plane (DCCP)
-Tranche 1: the facility-wide incarnation and epoch authority. It is the component
+Control Plane Epoch is the facility-wide incarnation and epoch authority.
+It is the component
 that decides whether a mutation is allowed to happen at all, and it is the
 component that fences everything issued before a change of epoch — stale
 controllers, superseded observations, state recovered from an earlier
