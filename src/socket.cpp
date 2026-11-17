@@ -307,6 +307,9 @@ void shutdown_handle(std::intptr_t handle) noexcept {
   }
 #if defined(_WIN32)
   ::shutdown(static_cast<NativeSocket>(handle), SD_BOTH);
+  // On Windows a shutdown does not release a receive that another thread is
+  // already blocked in; cancelling the pending operation does.
+  ::CancelIoEx(reinterpret_cast<HANDLE>(static_cast<NativeSocket>(handle)), nullptr);
 #else
   ::shutdown(static_cast<NativeSocket>(handle), SHUT_RDWR);
 #endif

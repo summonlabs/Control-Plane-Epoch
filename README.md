@@ -648,10 +648,12 @@ inversion between the in-process mutex and the operating-system lock. The lock i
 non-blocking: a second writer in the same process or in another process fails
 immediately with `persistence.store_locked` rather than waiting.
 
-**Bounded runtime.** `EpochAuthorityServer` runs a fixed worker pool
+**Bounded runtime.** `EpochAuthorityServer` starts a worker pool
 (`ServerOptions::workers`, default 4, maximum 32) over a bounded queue of
-accepted-but-unstarted sessions (default 256), with a bounded number of
-concurrent connections (default 128) and a bounded number of requests per
+accepted-but-unstarted sessions (default 256). A worker serves one connection
+until the peer closes it, so the pool gains a worker for every open connection
+beyond the workers it has, up to the bounded number of concurrent connections
+(default 128); a connection past that bound is refused. There is a bounded number of requests per
 connection (default 1,000,000, after which the client must reconnect). Frames are
 rejected before allocation when the declared payload length exceeds the
 negotiated bound, when the magic or version is wrong, or when the payload digest

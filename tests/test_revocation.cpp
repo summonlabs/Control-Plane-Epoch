@@ -514,3 +514,30 @@ CPE_TEST(revocation, ledger_is_ordered_chained_and_unknown_targets_are_rejected)
   CPE_REQUIRE(authority.grant_record(topology_grant.record().id()).value().revoked());
   CPE_REQUIRE(!authority.grant_record(bystander_grant.record().id()).value().revoked());
 }
+
+CPE_TEST(revocation, a_controller_revocation_that_fenced_grants_survives_a_restart) {
+  cpe_test::TestAuthority test_authority;
+  const MutationAuthority root = test_authority.root_authority();
+  const ControllerRegistration worker = test_authority.register_controller("worker-r");
+  const dccp::epoch::AuthorityGrantView grant =
+      test_authority.acquire("worker-r", worker.incarnation_id(), {"facility.inventory"}, root);
+  const MutationAuthority token = test_authority.mutation_authority_of(grant);
+
+  const RevocationRecord record =
+      revoke(test_authority, RevocationTarget::controller_all(cpe_test::controller_id("worker-r")), root);
+  CPE_REQUIRE_EQ(record.target_kind(), RevocationTargetKind::ControllerIncarnations);
+  CPE_REQUIRE_EQ(record.fenced_grant_count(), std::uint64_t{1});
+
+  // The generation that records the fence is the one a restarted authority has
+  // to open: the fenced grant names the controller revocation that fenced it.
+  test_authority.reopen();
+  auto& authority = test_authority.authority();
+  CPE_REQUIRE_EQ(validation_code(authority.validate_mutation(token, cpe_test::scope_name("facility.inventory"))),
+                 ErrorCode::AuthorityRevoked);
+  const auto fenced = authority.grant_record(grant.record().id());
+  CPE_REQUIRE(fenced.has_value());
+  CPE_REQUIRE(fenced.value().revoked());
+  CPE_REQUIRE(fenced.value().revoked_by_sequence().has_value());
+  CPE_REQUIRE_EQ(*fenced.value().revoked_by_sequence(), record.sequence());
+  CPE_REQUIRE(dccp::epoch::inspect_store(test_authority.store()).verified());
+}

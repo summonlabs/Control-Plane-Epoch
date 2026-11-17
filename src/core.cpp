@@ -232,8 +232,17 @@ void AuthorityCore::trim_revocations(AuthorityImage& image) {
 }
 
 void AuthorityCore::trim_idempotency(AuthorityImage& image) {
+  // Oldest first out. The records are kept in key order, so the first record is
+  // the oldest only among the keys of one controller incarnation: evicting it
+  // discarded the outcome that had just been recorded whenever that key sorted
+  // first, and a retry of the command was then applied a second time. Outcomes
+  // read from the durable generation leave first, in their stored order, and
+  // outcomes recorded by this process leave in the order they were recorded.
   while (image.idempotency.size() > max_idempotency_records) {
-    image.idempotency.erase(image.idempotency.begin());
+    const auto oldest = std::min_element(
+        image.idempotency.begin(), image.idempotency.end(),
+        [](const IdempotencyData& lhs, const IdempotencyData& rhs) { return lhs.arrival < rhs.arrival; });
+    image.idempotency.erase(oldest);
     image.idempotency_evicted += 1;
   }
 }
@@ -293,6 +302,7 @@ void AuthorityCore::record_idempotent(AuthorityImage& image, const IdempotencyKe
   entry.sequence = key.sequence().value();
   entry.command_digest = command_digest;
   entry.result_blob = std::move(result_blob);
+  entry.arrival = ++idempotency_arrivals_;
   if (entry.result_blob.size() > max_idempotency_blob_bytes) {
     throw EpochError(ErrorCode::SizeLimitExceeded, "the idempotency result blob exceeds its bound");
   }
@@ -684,7 +694,11 @@ Result<ControllerRegistration> AuthorityCore::register_controller(RegisterContro
       return recorded.rejection();
     }
     if (recorded.value().has_value()) {
-      CanonicalReader reader(std::span<const std::byte>(*recorded.value()), max_identifier_length);
+      // A recorded outcome carries a provenance note of up to max_note_length
+      // bytes, so its text bound is the bound of the blob, not of an identifier:
+      // with the identifier bound, a retry of a command recorded with a longer
+      // note failed instead of returning its outcome.
+      CanonicalReader reader(std::span<const std::byte>(*recorded.value()), max_idempotency_blob_bytes);
       ControllerRegistration replayed = decode_registration(reader, true);
       reader.expect_end();
       return replayed;
@@ -804,7 +818,7 @@ Result<AuthorityGrantView> AuthorityCore::acquire_authority(AcquireAuthorityRequ
       return recorded.rejection();
     }
     if (recorded.value().has_value()) {
-      CanonicalReader reader(std::span<const std::byte>(*recorded.value()), max_identifier_length);
+      CanonicalReader reader(std::span<const std::byte>(*recorded.value()), max_idempotency_blob_bytes);
       GrantData grant = decode_grant(reader);
       reader.expect_end();
       Result<AuthorityGrantView> view =
@@ -858,6 +872,20 @@ Result<AuthorityGrantView> AuthorityCore::acquire_authority(AcquireAuthorityRequ
   }
 
   AuthorityImage next = image();
+  // A fenced grant keeps its record for attribution until the epoch advances,
+  // but the records of one epoch must never outgrow what the reader of a durable
+  // generation accepts: a generation holding more could be published and never
+  // opened again. When the table is full the oldest fenced record makes room.
+  // Its identifier is never issued again, so a token naming it stays rejected.
+  while (next.grants.size() >= max_grants_per_epoch) {
+    const auto fenced = std::find_if(next.grants.begin(), next.grants.end(), [](const GrantData& candidate) {
+      return candidate.state != GrantState::Live;
+    });
+    if (fenced == next.grants.end()) {
+      break;
+    }
+    next.grants.erase(fenced);
+  }
   GrantData grant;
   grant.id = next.next_grant_id;
   next.next_grant_id += 1;
@@ -920,7 +948,7 @@ Result<EpochTransitionRecord> AuthorityCore::advance_epoch(AdvanceEpochRequest r
       return recorded.rejection();
     }
     if (recorded.value().has_value()) {
-      CanonicalReader reader(std::span<const std::byte>(*recorded.value()), max_identifier_length);
+      CanonicalReader reader(std::span<const std::byte>(*recorded.value()), max_idempotency_blob_bytes);
       TransitionData replayed = decode_transition(reader);
       reader.expect_end();
       return RecordFactory::make_transition(replayed);
@@ -1012,7 +1040,7 @@ Result<RevocationRecord> AuthorityCore::revoke_authority(RevokeAuthorityRequest 
       return recorded.rejection();
     }
     if (recorded.value().has_value()) {
-      CanonicalReader reader(std::span<const std::byte>(*recorded.value()), max_identifier_length);
+      CanonicalReader reader(std::span<const std::byte>(*recorded.value()), max_idempotency_blob_bytes);
       RevocationData replayed = decode_revocation(reader);
       reader.expect_end();
       return RecordFactory::mark_replayed(RecordFactory::make_revocation(replayed));

@@ -557,3 +557,70 @@ CPE_TEST(idempotency, retained_window_is_bounded_and_eviction_is_counted) {
   CPE_REQUIRE(inspection.problems().empty());
   CPE_REQUIRE_EQ(inspection.idempotency_record_count(), max_idempotency_records + 1);
 }
+
+CPE_TEST(idempotency, the_outcome_just_recorded_is_never_the_one_evicted) {
+  // The window is full of outcomes recorded for the authority root. A controller
+  // whose identifier sorts before the root's then records one more. The oldest
+  // outcome leaves the window; the retry of the command that was just applied
+  // still returns its recorded outcome and applies nothing.
+  TempDirectory directory;
+  seed_store_with_full_idempotency_window(directory.path(), max_idempotency_records);
+
+  StoreOpenOptions options;
+  options.directory = directory.path();
+  ControlPlaneEpochAuthority authority(options);
+
+  const ControllerId early = controller_id("aaa-early");
+  const ControllerIncarnationId first_incarnation =
+      ControllerIncarnationId::derive(domain_id("facility-alpha"), early, IncarnationNumber::from_trusted(1));
+  const RegisterControllerRequest request =
+      register_request("aaa-early", idempotency_key(early, first_incarnation, 1));
+
+  auto applied = authority.register_controller(request);
+  CPE_REQUIRE(applied.has_value());
+  CPE_REQUIRE(!applied.value().replayed());
+  CPE_REQUIRE_EQ(applied.value().incarnation_number().value(), 1u);
+  CPE_REQUIRE_EQ(authority.accounting().idempotency_records(), max_idempotency_records);
+  CPE_REQUIRE_EQ(authority.accounting().idempotency_records_evicted(), 1u);
+
+  auto retried = authority.register_controller(request);
+  CPE_REQUIRE(retried.has_value());
+  CPE_REQUIRE(retried.value().replayed());
+  require_same_registration(retried.value(), applied.value());
+  const auto record = authority.controller_record(early);
+  CPE_REQUIRE(record.has_value());
+  CPE_REQUIRE_EQ(record.value().incarnation_number().value(), 1u);
+  CPE_REQUIRE_EQ(record.value().registration_count(), 1u);
+}
+
+CPE_TEST(idempotency, a_replay_returns_an_outcome_recorded_with_a_long_provenance_note) {
+  // A provenance note may be max_note_length bytes long and is part of the
+  // recorded outcome, so the replay has to be able to read it back.
+  TestAuthority fixture;
+  const ControllerId controller = controller_id("ctrl-note");
+  const ControllerIncarnationId first_incarnation =
+      ControllerIncarnationId::derive(domain_id(fixture.domain()), controller, IncarnationNumber::from_trusted(1));
+
+  auto source = ProvenanceSourceId::parse("operator", "provenance source");
+  CPE_REQUIRE(source.has_value());
+  auto provenance = ProvenanceInput::create(ProvenanceSourceKind::Operator, source.move_value(), std::nullopt,
+                                            std::string(max_note_length, 'n'));
+  CPE_REQUIRE(provenance.has_value());
+
+  RegisterControllerRequest request;
+  request.controller = controller;
+  request.provenance = provenance.move_value();
+  request.idempotency = idempotency_key(controller, first_incarnation, 1);
+
+  auto applied = fixture.authority().register_controller(request);
+  CPE_REQUIRE(applied.has_value());
+  CPE_REQUIRE(!applied.value().replayed());
+
+  auto retried = fixture.authority().register_controller(request);
+  CPE_REQUIRE(retried.has_value());
+  CPE_REQUIRE(retried.value().replayed());
+  require_same_registration(retried.value(), applied.value());
+  const auto record = fixture.authority().controller_record(controller);
+  CPE_REQUIRE(record.has_value());
+  CPE_REQUIRE_EQ(record.value().registration_count(), 1u);
+}

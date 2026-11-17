@@ -398,8 +398,16 @@ void verify_image(const AuthorityImage& image, const ImageLimits& limits) {
     if (match == image.revocations.end()) {
       continue;  // trimmed: the sequence is still within the issued range
     }
-    if (match->target_kind != RevocationTargetKind::Grant || !match->grant.has_value() ||
-        *match->grant != grant.id) {
+    // A grant is fenced either by a revocation of that grant or by a revocation
+    // of its controller that reaches its incarnation; both record their sequence
+    // on the grant.
+    const bool targets_grant = match->target_kind == RevocationTargetKind::Grant && match->grant.has_value() &&
+                               *match->grant == grant.id;
+    const bool targets_controller = match->target_kind == RevocationTargetKind::ControllerIncarnations &&
+                                    match->controller == grant.controller &&
+                                    match->through_incarnation.has_value() &&
+                                    grant.incarnation_number <= *match->through_incarnation;
+    if (!targets_grant && !targets_controller) {
       throw EpochError(ErrorCode::CountMismatch, "grant " + std::to_string(grant.id) +
                                                      " names a revocation that does not target it");
     }

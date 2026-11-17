@@ -1085,3 +1085,111 @@ CPE_TEST(concurrency, read_only_inspection_never_sees_a_half_published_generatio
                   "the settled snapshot digest must be the one the authority published");
 }
 
+// ---------------------------------------------------------------------------
+// The remote runtime
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// One runtime over an authority, with its accept loop on its own thread.
+class RuntimeUnderTest {
+ public:
+  RuntimeUnderTest(dccp::epoch::ControlPlaneEpochAuthority& authority, dccp::epoch::ServerOptions options)
+      : server_(authority, std::move(options)) {
+    server_.start();
+    acceptor_ = std::thread([this] { (void)server_.accept_until(0); });
+  }
+
+  ~RuntimeUnderTest() { stop(); }
+
+  RuntimeUnderTest(const RuntimeUnderTest&) = delete;
+  RuntimeUnderTest& operator=(const RuntimeUnderTest&) = delete;
+
+  void stop() {
+    server_.stop();
+    if (acceptor_.joinable()) {
+      acceptor_.join();
+    }
+  }
+
+  [[nodiscard]] dccp::epoch::ClientOptions client_options() const {
+    dccp::epoch::ClientOptions options;
+    options.port = server_.port();
+    return options;
+  }
+
+  [[nodiscard]] dccp::epoch::ServerAccounting accounting() const { return server_.accounting(); }
+
+ private:
+  dccp::epoch::EpochAuthorityServer server_;
+  std::thread acceptor_;
+};
+
+}  // namespace
+
+CPE_TEST(concurrency, a_connected_controller_never_keeps_another_from_being_served) {
+  // A controller keeps its connection for as long as it runs. More controllers
+  // than the runtime has workers are connected at once, and every one of them is
+  // answered while all the others stay connected.
+  cpe_test::TestAuthority test_authority;
+  dccp::epoch::ServerOptions options;
+  options.workers = 2;
+  RuntimeUnderTest runtime(test_authority.authority(), options);
+
+  constexpr std::size_t kControllers = 6;
+  std::vector<std::unique_ptr<dccp::epoch::EpochAuthorityClient>> clients;
+  for (std::size_t index = 0; index < kControllers; ++index) {
+    clients.push_back(std::make_unique<dccp::epoch::EpochAuthorityClient>(runtime.client_options()));
+  }
+  for (const auto& client : clients) {
+    const auto status = client->status();
+    CPE_REQUIRE(status.has_value());
+    CPE_REQUIRE_EQ(status.value().epoch().value(), std::uint64_t{1});
+  }
+  CPE_REQUIRE_EQ(runtime.accounting().active_connections(), std::uint64_t{kControllers});
+
+  clients.clear();
+  runtime.stop();
+  CPE_REQUIRE_EQ(runtime.accounting().sessions_accepted(), std::uint64_t{kControllers});
+  CPE_REQUIRE_EQ(runtime.accounting().sessions_closed(), std::uint64_t{kControllers});
+  CPE_REQUIRE_EQ(runtime.accounting().active_connections(), std::uint64_t{0});
+}
+
+CPE_TEST(concurrency, a_connection_past_the_bound_is_refused_and_the_others_are_served) {
+  cpe_test::TestAuthority test_authority;
+  dccp::epoch::ServerOptions options;
+  options.workers = 1;
+  options.max_connections = 2;
+  RuntimeUnderTest runtime(test_authority.authority(), options);
+
+  dccp::epoch::EpochAuthorityClient first(runtime.client_options());
+  dccp::epoch::EpochAuthorityClient second(runtime.client_options());
+
+  // Both permitted connections are open, so a third is refused, not left waiting.
+  bool refused = false;
+  try {
+    dccp::epoch::EpochAuthorityClient third(runtime.client_options());
+  } catch (const dccp::epoch::EpochError&) {
+    refused = true;
+  }
+  CPE_REQUIRE(refused);
+
+  CPE_REQUIRE(first.status().has_value());
+  CPE_REQUIRE(second.status().has_value());
+  CPE_REQUIRE_EQ(runtime.accounting().active_connections(), std::uint64_t{2});
+}
+
+CPE_TEST(concurrency, stopping_the_runtime_does_not_wait_for_a_silent_controller) {
+  cpe_test::TestAuthority test_authority;
+  RuntimeUnderTest runtime(test_authority.authority(), dccp::epoch::ServerOptions{});
+
+  dccp::epoch::EpochAuthorityClient idle(runtime.client_options());
+  CPE_REQUIRE(idle.status().has_value());
+
+  // The controller stays connected and sends nothing more. stop() releases the
+  // worker that is waiting for its next request and returns.
+  runtime.stop();
+  CPE_REQUIRE_EQ(runtime.accounting().sessions_accepted(), std::uint64_t{1});
+  CPE_REQUIRE_EQ(runtime.accounting().sessions_closed(), std::uint64_t{1});
+  CPE_REQUIRE_EQ(runtime.accounting().active_connections(), std::uint64_t{0});
+}

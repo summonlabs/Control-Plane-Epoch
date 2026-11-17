@@ -120,6 +120,11 @@ struct IdempotencyData {
   std::uint64_t sequence = 0;
   Sha256Digest command_digest;
   std::vector<std::byte> result_blob;
+
+  /// Order in which this process recorded the outcome; 0 for an outcome read
+  /// from a durable generation. Never encoded: it only decides which outcome
+  /// leaves a full window first.
+  std::uint64_t arrival = 0;
 };
 
 /// Bounded number of superseded incarnation identities retained per controller.

@@ -46,7 +46,13 @@ void CanonicalWriter::reserve_for(std::size_t count, std::string_view what) {
                                                            std::to_string(required) +
                                                            " exceeds the limit of " + std::to_string(limit_));
   }
-  data_.reserve(required);
+  // Capacity grows geometrically. Reserving exactly the required size made every
+  // write reallocate and copy the whole buffer, so encoding an image took time
+  // quadratic in its size and a domain near its documented bounds could not
+  // commit at all.
+  if (required > data_.capacity()) {
+    data_.reserve(std::min(limit_, std::max(required, data_.capacity() + data_.capacity() / 2)));
+  }
 }
 
 void CanonicalWriter::u8(std::uint8_t value) {

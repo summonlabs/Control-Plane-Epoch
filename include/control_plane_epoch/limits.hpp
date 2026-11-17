@@ -91,7 +91,9 @@ inline constexpr std::size_t max_server_connections = 128;
 /// Maximum number of accepted-but-unstarted sessions queued by the runtime.
 inline constexpr std::size_t max_server_queue_depth = 256;
 
-/// Maximum number of worker threads an authority runtime may create.
+/// Maximum number of worker threads an authority runtime may be configured to
+/// start with. It adds one for every open connection beyond that, up to its
+/// connection bound.
 inline constexpr std::uint32_t max_server_workers = 32;
 
 /// Default worker count for an authority runtime.

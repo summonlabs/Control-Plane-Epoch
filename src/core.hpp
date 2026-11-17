@@ -130,6 +130,9 @@ class AuthorityCore {
   mutable std::mutex mutex_;
   std::unique_ptr<AuthorityStore> store_;
   std::optional<DurableCommitReport> last_commit_;
+
+  /// Number of idempotency outcomes recorded by this process, guarded by mutex_.
+  std::uint64_t idempotency_arrivals_ = 0;
 };
 
 }  // namespace dccp::epoch::detail

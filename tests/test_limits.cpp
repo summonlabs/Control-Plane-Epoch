@@ -196,6 +196,120 @@ struct SaturatedStore {
   return result;
 }
 
+/// A verified generation whose epoch already holds max_grants_per_epoch grant
+/// records, all but the root's genesis grant fenced by a later registration of
+/// their controller. Reaching this state through the public API would take that
+/// many durable commits, so it is written through the internal codec.
+void seed_grant_saturated_store(const std::filesystem::path& directory) {
+  const FacilityAuthorityDomainId domain = domain_id("facility-alpha");
+  const ControllerId root = controller_id("authority-root");
+  const ControllerId worker = controller_id("worker-s");
+  const ControllerIncarnationId root_incarnation =
+      ControllerIncarnationId::derive(domain, root, IncarnationNumber::from_trusted(1));
+  const ControllerIncarnationId worker_first =
+      ControllerIncarnationId::derive(domain, worker, IncarnationNumber::from_trusted(1));
+  const ControllerIncarnationId worker_second =
+      ControllerIncarnationId::derive(domain, worker, IncarnationNumber::from_trusted(2));
+
+  detail::AuthorityImage image;
+  image.schema_version = static_cast<std::uint32_t>(durable_schema_version);
+  image.domain = domain.str();
+  image.domain_instance = 1;
+  image.epoch = 1;
+  image.durable_generation = 1;
+  image.authority_root = root.str();
+  image.declared_scopes = default_scopes();
+
+  detail::ControllerData root_record;
+  root_record.controller = root.str();
+  root_record.incarnation_number = 1;
+  root_record.incarnation_id = root_incarnation.digest();
+  root_record.incarnation_state = IncarnationState::Current;
+  root_record.registration_count = 1;
+  root_record.first_registered_epoch = 1;
+  root_record.latest_registered_epoch = 1;
+  root_record.latest_registration_provenance = seed_provenance(1, 1);
+  root_record.record_digest = detail::compute_controller_digest(root_record);
+  image.controllers.push_back(root_record);
+
+  detail::ControllerData worker_record;
+  worker_record.controller = worker.str();
+  worker_record.incarnation_number = 2;
+  worker_record.incarnation_id = worker_second.digest();
+  worker_record.incarnation_state = IncarnationState::Current;
+  worker_record.registration_count = 2;
+  worker_record.first_registered_epoch = 1;
+  worker_record.latest_registered_epoch = 1;
+  worker_record.superseded_incarnations.push_back(worker_first.digest());
+  worker_record.latest_registration_provenance = seed_provenance(1, 4);
+  worker_record.record_digest = detail::compute_controller_digest(worker_record);
+  image.controllers.push_back(worker_record);
+
+  detail::GrantData genesis;
+  genesis.id = 1;
+  genesis.authority_class = AuthorityClass::Mutation;
+  genesis.epoch = 1;
+  genesis.controller = root.str();
+  genesis.incarnation_number = 1;
+  genesis.incarnation_id = root_incarnation.digest();
+  genesis.scopes = image.declared_scopes;
+  genesis.sequence = 2;
+  genesis.state = detail::GrantState::Live;
+  genesis.provenance = seed_provenance(1, 2);
+  genesis.record_digest = detail::compute_grant_digest(genesis);
+  image.grants.push_back(genesis);
+
+  const detail::ProvenanceData fenced_provenance = seed_provenance(1, 5);
+  image.grants.reserve(max_grants_per_epoch);
+  for (std::uint64_t id = 2; id <= max_grants_per_epoch; ++id) {
+    detail::GrantData fenced;
+    fenced.id = id;
+    fenced.authority_class = AuthorityClass::Observation;
+    fenced.epoch = 1;
+    fenced.controller = worker.str();
+    fenced.incarnation_number = 1;
+    fenced.incarnation_id = worker_first.digest();
+    fenced.scopes = {"facility.inventory"};
+    fenced.sequence = 5;
+    fenced.state = detail::GrantState::Superseded;
+    fenced.provenance = fenced_provenance;
+    fenced.record_digest = detail::compute_grant_digest(fenced);
+    image.grants.push_back(std::move(fenced));
+  }
+
+  detail::TransitionData transition;
+  transition.sequence = 1;
+  transition.origin = true;
+  transition.base_epoch = 0;
+  transition.new_epoch = 1;
+  transition.reason = EpochTransitionReason::Genesis;
+  transition.committed_by = root.str();
+  transition.committed_by_incarnation = root_incarnation.digest();
+  transition.committed_by_grant = genesis.id;
+  transition.fenced_grant_count = 0;
+  transition.controller_count = 1;
+  transition.provenance = seed_provenance(1, 3);
+  transition.previous_record_digest = Sha256Digest::zero();
+  transition.record_digest = detail::compute_transition_digest(transition);
+  image.transitions.push_back(transition);
+  image.transition_count = 1;
+  image.next_grant_id = max_grants_per_epoch + 1;
+  image.next_mutation_sequence = 6;
+
+  const std::vector<std::byte> payload = detail::encode_image(image, detail::default_image_limits());
+  write_envelope_file(directory / std::string(StoreLayout::snapshot_file), 1, 1, payload,
+                      max_snapshot_bytes + detail::envelope_header_bytes);
+
+  detail::FloorData floor;
+  floor.domain = image.domain;
+  floor.domain_instance = image.domain_instance;
+  floor.epoch = 1;
+  floor.generation = 1;
+  floor.snapshot_digest = sha256(std::span<const std::byte>(payload));
+  write_envelope_file(directory / std::string(StoreLayout::floor_file), 1, 1, detail::encode_floor(floor),
+                      max_floor_bytes + detail::envelope_header_bytes);
+}
+
 /// Standing-root bootstrap used by the crafted-store tests, which cannot use the
 /// TestAuthority fixture because they start from a pre-existing directory.
 [[nodiscard]] MutationAuthority bootstrap_root(ControlPlaneEpochAuthority& authority) {
@@ -646,4 +760,32 @@ CPE_TEST(limits, a_retained_window_above_the_bound_is_refused_by_the_reader) {
   const StoreInspection inspection = inspect_store(directory.path());
   CPE_REQUIRE(!inspection.verified());
   CPE_REQUIRE(!inspection.problems().empty());
+}
+
+CPE_TEST(limits, fenced_grant_records_never_make_a_generation_unreadable) {
+  // max_grants_per_epoch bounds the live grants of an epoch, and a fenced grant
+  // keeps its record until the epoch advances. The records of one epoch must
+  // still never outgrow what the reader of a durable generation accepts.
+  TempDirectory directory;
+  seed_grant_saturated_store(directory.path());
+
+  std::optional<MutationAuthority> root;
+  {
+    ControlPlaneEpochAuthority authority(options_for(directory.path()));
+    CPE_REQUIRE_EQ(authority.accounting().grant_records(), std::uint64_t{max_grants_per_epoch});
+    CPE_REQUIRE_EQ(authority.status().live_grant_count(), std::uint64_t{1});
+
+    // One live grant is far below the bound, so the root is granted authority.
+    root = bootstrap_root(authority);
+    CPE_REQUIRE(authority.validate_mutation(*root, scope_name("epoch.advance")).accepted());
+    CPE_REQUIRE_EQ(authority.status().live_grant_count(), std::uint64_t{2});
+    authority.close();
+  }
+
+  // The generation that grant produced is the one a restarted authority opens.
+  ControlPlaneEpochAuthority reopened(options_for(directory.path()));
+  CPE_REQUIRE(reopened.initialized());
+  CPE_REQUIRE_EQ(reopened.status().live_grant_count(), std::uint64_t{2});
+  CPE_REQUIRE(reopened.accounting().grant_records() <= max_grants_per_epoch);
+  CPE_REQUIRE(reopened.validate_mutation(*root, scope_name("epoch.advance")).accepted());
 }

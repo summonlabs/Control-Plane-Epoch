@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <deque>
 #include <mutex>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -89,10 +90,14 @@ class ServerCore {
     }
     stopping_.store(false);
     running_ = true;
-    workers_.reserve(options_.workers);
+    std::size_t started = 0;
     for (std::uint32_t index = 0; index < options_.workers; ++index) {
-      workers_.emplace_back([this] { worker_loop(); });
+      if (add_worker()) {
+        ++started;
+      }
     }
+    std::lock_guard<std::mutex> queue_guard(queue_mutex_);
+    worker_count_ = started;
   }
 
   std::uint64_t accept_until(std::uint64_t max_requests) {
@@ -109,7 +114,29 @@ class ServerCore {
       if (stopping_.load()) {
         break;
       }
-      if (active_connections_.load() >= options_.max_connections) {
+      bool at_bound = false;
+      {
+        std::unique_lock<std::mutex> lock(queue_mutex_);
+        queue_space_.wait(lock, [this] { return stopping_.load() || queue_.size() < options_.queue_depth; });
+        if (stopping_.load()) {
+          break;
+        }
+        // Every open connection counts, whether a worker has taken it yet or not.
+        if (serving_ + queue_.size() >= options_.max_connections) {
+          at_bound = true;
+        } else {
+          queue_.push_back(std::move(session));
+          // A worker serves one connection until the peer closes it, and a
+          // controller keeps its connection open. With only the configured
+          // workers, that many connected controllers left every later connection
+          // waiting for a handshake answer that never came. Each open connection
+          // therefore gets a worker of its own, up to the connection bound.
+          if (serving_ + queue_.size() > worker_count_ && add_worker()) {
+            ++worker_count_;
+          }
+        }
+      }
+      if (at_bound) {
         // Bound reached: answer explicitly instead of accepting unbounded work.
         try {
           const Frame response =
@@ -123,15 +150,6 @@ class ServerCore {
         session.close();
         continue;
       }
-
-      {
-        std::unique_lock<std::mutex> lock(queue_mutex_);
-        queue_space_.wait(lock, [this] { return stopping_.load() || queue_.size() < options_.queue_depth; });
-        if (stopping_.load()) {
-          break;
-        }
-        queue_.push_back(std::move(session));
-      }
       queue_ready_.notify_one();
     }
     return requests_served_.load() - start_count;
@@ -140,7 +158,7 @@ class ServerCore {
   void stop() noexcept {
     {
       std::lock_guard<std::mutex> guard(lifecycle_mutex_);
-      if (!running_ && workers_.empty()) {
+      if (!running_) {
         listener_.close();
         return;
       }
@@ -163,12 +181,22 @@ class ServerCore {
     queue_ready_.notify_all();
     queue_space_.notify_all();
 
-    for (std::thread& worker : workers_) {
+    // No worker is added once stopping_ is set, so this is every worker there is.
+    std::vector<std::thread> workers;
+    {
+      std::lock_guard<std::mutex> guard(workers_mutex_);
+      workers.swap(workers_);
+    }
+    for (std::thread& worker : workers) {
       if (worker.joinable()) {
         worker.join();
       }
     }
-    workers_.clear();
+    {
+      std::lock_guard<std::mutex> guard(queue_mutex_);
+      worker_count_ = 0;
+    }
+    std::lock_guard<std::mutex> guard(lifecycle_mutex_);
     running_ = false;
   }
 
@@ -195,6 +223,26 @@ class ServerCore {
   }
 
  private:
+  /// Adds one worker unless the runtime is stopping or the platform refuses
+  /// another thread. Returns whether a worker was added.
+  [[nodiscard]] bool add_worker() {
+    std::lock_guard<std::mutex> guard(workers_mutex_);
+    if (stopping_.load()) {
+      return false;
+    }
+    try {
+      workers_.emplace_back([this] { worker_loop(); });
+    } catch (const std::system_error&) {
+      return false;  // the connection waits for a worker that becomes free
+    }
+    return true;
+  }
+
+  void session_finished() {
+    std::lock_guard<std::mutex> guard(queue_mutex_);
+    --serving_;
+  }
+
   void worker_loop() {
     while (true) {
       net::Socket session;
@@ -209,6 +257,7 @@ class ServerCore {
         }
         session = std::move(queue_.front());
         queue_.pop_front();
+        ++serving_;
       }
       queue_space_.notify_one();
 
@@ -223,9 +272,11 @@ class ServerCore {
         } catch (const EpochError&) {
         }
         session.close();
+        session_finished();
         continue;
       }
       serve_session(std::move(session));
+      session_finished();
     }
   }
 
@@ -324,8 +375,10 @@ class ServerCore {
         }
       }
     } catch (const EpochError& error) {
-      // A failing session is closed; the runtime itself stays healthy.
-      if (error.code() != ErrorCode::SocketClosed && error.code() != ErrorCode::FrameTruncated) {
+      // A failing session is closed; the runtime itself stays healthy. A receive
+      // released by stop() is the shutdown, not a rejected request.
+      if (!stopping_.load() && error.code() != ErrorCode::SocketClosed &&
+          error.code() != ErrorCode::FrameTruncated) {
         requests_rejected_.fetch_add(1);
       }
     }
@@ -641,7 +694,12 @@ class ServerCore {
   mutable std::mutex sessions_mutex_;
   std::vector<std::intptr_t> active_sessions_;
 
+  /// Guards workers_. Taken after queue_mutex_ when both are held.
+  std::mutex workers_mutex_;
   std::vector<std::thread> workers_;
+  /// Workers started and connections a worker is serving; guarded by queue_mutex_.
+  std::size_t worker_count_ = 0;
+  std::size_t serving_ = 0;
 
   std::atomic<std::uint64_t> active_connections_{0};
   std::atomic<std::uint64_t> sessions_accepted_{0};
